@@ -198,6 +198,10 @@ A huge thank you to every developer who took the time to improve this extension 
 
 ## Version History
 
+### Version 307.0
+- With the Windows Terminal terminal type, dragging the mouse in another application that covers the Claude Code panel no longer holds down Shift in that application.
+- Thanks to [@adrian-schmidt-foehre-mint](https://github.com/adrian-schmidt-foehre-mint) for reporting (#263).
+
 ### Version 306.0
 - The licensing contact line now points to GitHub issues instead of an email address.
 

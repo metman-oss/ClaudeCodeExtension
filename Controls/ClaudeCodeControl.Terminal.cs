@@ -4415,8 +4415,9 @@ namespace ClaudeCodeVS
 
         /// <summary>
         /// Hook-thread-safe equivalent of <see cref="IsScreenPointInsideActiveTerminalPanel"/>: a
-        /// plain Win32 GetWindowRect hit test against the embedded terminal handle itself, with no
-        /// WPF/WinForms access. Used by the selection-assist tracking below, which must run inline
+        /// plain Win32 GetWindowRect hit test against the embedded terminal handle itself, plus a
+        /// WindowFromPoint occlusion check (issue #263), with no WPF/WinForms access. Used by the
+        /// selection-assist tracking below, which must run inline
         /// on the mouse-hook thread (see <see cref="BeginWindowsTerminalSelectionTracking"/>).
         /// </summary>
         private bool IsScreenPointInsideTerminalWindow(POINT screenPoint)
@@ -4425,8 +4426,21 @@ namespace ClaudeCodeVS
             if (handle == IntPtr.Zero || !IsWindow(handle)) return false;
             if (!GetWindowRect(handle, out RECT rect)) return false;
 
-            return screenPoint.x >= rect.Left && screenPoint.x < rect.Right &&
-                   screenPoint.y >= rect.Top && screenPoint.y < rect.Bottom;
+            if (screenPoint.x < rect.Left || screenPoint.x >= rect.Right ||
+                screenPoint.y < rect.Top || screenPoint.y >= rect.Bottom)
+            {
+                return false;
+            }
+
+            // The rectangle stays valid when another application's window covers the terminal
+            // (issue #263): require the window actually under the cursor to belong to the same
+            // top-level window as the terminal, so a drag in an overlapping app never gets SHIFT.
+            IntPtr hwndAtPoint = WindowFromPoint(screenPoint);
+            if (hwndAtPoint == IntPtr.Zero) return false;
+            if (hwndAtPoint == handle || IsChild(handle, hwndAtPoint)) return true;
+
+            IntPtr terminalRoot = GetAncestor(handle, GA_ROOT);
+            return terminalRoot != IntPtr.Zero && GetAncestor(hwndAtPoint, GA_ROOT) == terminalRoot;
         }
 
         /// <summary>
