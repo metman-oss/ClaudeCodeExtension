@@ -160,6 +160,9 @@ namespace ClaudeCodeVS
         /// <summary>The "Claude account changed, sign in on the usage page" notice's slot.</summary>
         private IVsInfoBarUIElement _activeUsageAccountInfoBar;
 
+        /// <summary>The pre-prompt git pull's own info-bar slot (terminal mode has no chat to put its notice in).</summary>
+        private IVsInfoBarUIElement _activeGitPullInfoBar;
+
         /// <summary>
         /// Which main-window info bar a notification owns. A new bar replaces only the previous one
         /// in its own slot. With a single slot, whichever notice came second silently closed the
@@ -172,6 +175,7 @@ namespace ClaudeCodeVS
             AgentFinish,
             TerminalGeometry,
             UsageAccount,
+            GitPull,
         }
 
         /// <summary>Info bar currently shown in <paramref name="slot"/>, or null.</summary>
@@ -181,6 +185,7 @@ namespace ClaudeCodeVS
             {
                 case InfoBarSlot.TerminalGeometry: return _activeTerminalGeometryInfoBar;
                 case InfoBarSlot.UsageAccount: return _activeUsageAccountInfoBar;
+                case InfoBarSlot.GitPull: return _activeGitPullInfoBar;
                 default: return _activeAgentFinishInfoBar;
             }
         }
@@ -195,6 +200,10 @@ namespace ClaudeCodeVS
             else if (slot == InfoBarSlot.UsageAccount)
             {
                 _activeUsageAccountInfoBar = element;
+            }
+            else if (slot == InfoBarSlot.GitPull)
+            {
+                _activeGitPullInfoBar = element;
             }
             else
             {

@@ -334,5 +334,91 @@ namespace ClaudeCodeExtension.Tests
         }
 
         #endregion
+
+        #region Hold-back checks (#264)
+
+        [TestMethod]
+        public void ParseStatusPaths_ReturnsEveryLocalPathIncludingUntrackedAndBothRenameNames()
+        {
+            // With -z, a rename is "R  new\0old": the original name is its own field, without a code.
+            string status = string.Join("\0", new[]
+            {
+                " M Controls/Edited.cs",
+                "?? new-file.txt",
+                "R  Models/Renamed.cs",
+                "Models/Original.cs",
+                " D Gone.cs",
+                ""
+            });
+
+            CollectionAssert.AreEqual(
+                new[] { "Controls/Edited.cs", "new-file.txt", "Models/Renamed.cs", "Models/Original.cs", "Gone.cs" },
+                ClaudeCodeControl.ParseStatusPaths(status));
+        }
+
+        [TestMethod]
+        public void ParseStatusPaths_EmptyTreeHasNoPaths()
+        {
+            Assert.AreEqual(0, ClaudeCodeControl.ParseStatusPaths(string.Empty).Count);
+            Assert.AreEqual(0, ClaudeCodeControl.ParseStatusPaths(null).Count);
+        }
+
+        [TestMethod]
+        public void SplitNulPaths_DropsTheTrailingEmptyField()
+        {
+            CollectionAssert.AreEqual(new[] { "f.txt", "dir/n.txt" },
+                ClaudeCodeControl.SplitNulPaths("f.txt\0dir/n.txt\0"));
+        }
+
+        [TestMethod]
+        public void ParseMergeTreeConflicts_SkipsTheTreeIdLine()
+        {
+            // Measured with git 2.56: `merge-tree --write-tree --no-messages --name-only` exits 1 and
+            // prints the tree id followed by one conflicted path per line.
+            string output = "36794e1be42a172015bbe1d50a65545c2f86d092\nf.txt\nsrc/Other.cs\n";
+
+            CollectionAssert.AreEqual(new[] { "f.txt", "src/Other.cs" },
+                ClaudeCodeControl.ParseMergeTreeConflicts(output));
+        }
+
+        [TestMethod]
+        public void FindOverlappingPaths_MatchesCaseAndSlashInsensitively()
+        {
+            List<string> overlap = ClaudeCodeControl.FindOverlappingPaths(
+                new[] { "Controls\\Edited.cs", "readme.md" },
+                new[] { "controls/edited.cs", "Other.cs", "README.md" });
+
+            CollectionAssert.AreEqual(new[] { "controls/edited.cs", "README.md" }, overlap);
+        }
+
+        [TestMethod]
+        public void FindOverlappingPaths_NoSharedFileMeansTheMergeCanRun()
+        {
+            Assert.AreEqual(0, ClaudeCodeControl.FindOverlappingPaths(new[] { "a.cs" }, new[] { "b.cs" }).Count);
+            Assert.AreEqual(0, ClaudeCodeControl.FindOverlappingPaths(null, new[] { "b.cs" }).Count);
+        }
+
+        [TestMethod]
+        public void BuildHeldBackNotice_NamesTheBranchAndAtMostThreeFiles()
+        {
+            string notice = ClaudeCodeControl.BuildHeldBackNotice("origin/main",
+                new List<string> { "a.cs", "b.cs", "c.cs", "d.cs", "e.cs" }, uncommitted: true);
+
+            StringAssert.Contains(notice, "origin/main");
+            StringAssert.Contains(notice, "a.cs, b.cs, c.cs and 2 more");
+            Assert.IsFalse(notice.Contains("d.cs"));
+            StringAssert.Contains(notice, "Nothing was pulled");
+        }
+
+        [TestMethod]
+        public void BuildHeldBackNotice_LocalCommitConflictSaysSo()
+        {
+            string notice = ClaudeCodeControl.BuildHeldBackNotice("origin/main",
+                new List<string> { "f.txt" }, uncommitted: false);
+
+            StringAssert.Contains(notice, "conflict with your local commits (f.txt)");
+        }
+
+        #endregion
     }
 }

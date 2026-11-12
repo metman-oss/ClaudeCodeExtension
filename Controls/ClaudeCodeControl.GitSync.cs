@@ -8,9 +8,11 @@
  *
  * Purpose: "Pull from git before sending a prompt" feature. When the setting is enabled (default),
  *          a user-initiated prompt first runs `git pull` in the workspace repository so the agent
- *          never edits a file that is already out of date on the remote. A pull that ends in
- *          conflicts is not rolled back: the conflicted files are described in a block prepended to
- *          the prompt, so the agent resolves them as the first part of the turn.
+ *          never edits a file that is already out of date on the remote. The pull fetches first and
+ *          is held back (nothing merged, a notice instead) when the incoming commits touch files the
+ *          user has edited locally or would conflict with local commits (#264). Conflicts that
+ *          still happen, or were already open, are described in a block prepended to the prompt,
+ *          so the agent resolves them as the first part of the turn.
  *
  * *******************************************************************************************************************/
 
@@ -43,6 +45,12 @@ namespace ClaudeCodeVS
 
         /// <summary>The pull left conflicted files in the working tree.</summary>
         Conflicts,
+
+        /// <summary>
+        /// Incoming commits were found but not merged: they touch files with uncommitted local edits,
+        /// or would conflict with local commits. Nothing in the working tree was changed.
+        /// </summary>
+        HeldBack,
 
         /// <summary>The pull could not run to completion (offline, auth, timeout, dirty tree git refused).</summary>
         Failed
@@ -287,17 +295,40 @@ namespace ClaudeCodeVS
             Debug.WriteLine($"Auto git pull: {outcome.Kind} {outcome.Notice}");
             LogTerminalLaunch($"Auto git pull: {outcome.Kind} {outcome.Notice}");
 
-            if (string.IsNullOrWhiteSpace(outcome.Notice) || !IsNativeModeActive)
+            if (string.IsNullOrWhiteSpace(outcome.Notice))
                 return;
 
             try
             {
-                AddNativeMessage(ChatMessageKind.Notice, outcome.Notice);
+                if (IsNativeModeActive)
+                {
+                    AddNativeMessage(ChatMessageKind.Notice, outcome.Notice);
+                    return;
+                }
+
+                // Terminal mode has no transcript. Without this the only trace of the pull was the
+                // conflict block showing up in the user's own prompt, unexplained (#264).
+#pragma warning disable VSSDK007, VSTHRD110 // Fire-and-forget: the info bar must not hold up the send.
+                ThreadHelper.JoinableTaskFactory.RunAsync(() => ShowAgentFinishNotificationAsync(
+                        outcome.Notice, Loc.L("Turn off auto-pull"), TurnOffAutoPullAsync, InfoBarSlot.GitPull))
+                    .FileAndForget("claudecode/gitsync/infobar");
+#pragma warning restore VSSDK007, VSTHRD110
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Failed to show auto-pull notice: {ex.Message}");
             }
+        }
+
+        /// <summary>Info bar action: same as unchecking "Pull from git before the first prompt" in Settings.</summary>
+        private async Task TurnOffAutoPullAsync()
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            if (_settings == null)
+                return;
+
+            _settings.AutoGitPullBeforePrompt = false;
+            SaveSettings();
         }
 
         #endregion
@@ -337,21 +368,58 @@ namespace ClaudeCodeVS
                 return LogSkip(skipped, "the current branch has no upstream to pull from");
 
             string upstreamName = upstream.StdOut.Trim();
+
+            // Fetch first and look before merging (#264). Pulling straight away turned a user's
+            // uncommitted edits into conflict markers whenever a teammate had touched the same files,
+            // and then handed that state to the agent in front of the user's message. Now the merge
+            // only runs when it can't conflict; otherwise nothing is touched and the user is told.
+            GitCommandResult fetch = RunGitDetailed(repoRoot, "fetch --quiet", GitSyncPullTimeoutMs);
+            if (fetch == null)
+                return TimedOutOutcome();
+            if (fetch.ExitCode != 0)
+                return ClassifyPullResult(fetch.ExitCode, fetch.StdOut, fetch.StdErr, null, false,
+                    upstreamName, false, false, false);
+
+            if (CountCommits(repoRoot, "HEAD..@{u}") == 0)
+                return new GitPullOutcome { Kind = GitPullOutcomeKind.UpToDate, PullExecuted = true };
+
+            List<string> incomingFiles = ReadPathList(repoRoot, "diff --name-only -z HEAD...@{u}");
+
+            // Uncommitted edits (and untracked files) that the incoming commits also touch: the merge
+            // would either refuse or leave the autostash conflicted. Leave both sides alone.
+            GitCommandResult status = RunGitDetailed(repoRoot, "status --porcelain=v1 -z --untracked-files=all",
+                GitSyncPreflightTimeoutMs);
+            List<string> localFiles = status != null && status.ExitCode == 0
+                ? ParseStatusPaths(status.StdOut)
+                : new List<string>();
+            List<string> editedAndIncoming = FindOverlappingPaths(localFiles, incomingFiles);
+            if (editedAndIncoming.Count > 0)
+                return HeldBackOutcome(BuildHeldBackNotice(upstreamName, editedAndIncoming, uncommitted: true));
+
+            // Local commits that diverge from upstream: predict the merge before running it.
+            if (CountCommits(repoRoot, "@{u}..HEAD") != 0)
+            {
+                List<string> predicted = PredictMergeConflicts(repoRoot, incomingFiles);
+                if (predicted.Count > 0)
+                    return HeldBackOutcome(BuildHeldBackNotice(upstreamName, predicted, uncommitted: false));
+            }
+
             string headBefore = GetHeadCommit(repoRoot);
 
-            // --no-rebase keeps a failed pull as a conflicted *merge*: conflict markers in the working
-            // tree, `git status` listing both sides, and `git merge --abort` as the way out. That is
-            // the state an agent can actually resolve — a half-finished rebase is not.
-            // --autostash lets the pull run with uncommitted work in the tree instead of refusing.
-            GitCommandResult pull = RunGitDetailed(repoRoot, "pull --no-rebase --autostash", GitSyncPullTimeoutMs);
+            // The fetch already ran, so merge the upstream directly instead of paying a second
+            // network round-trip through `git pull`. A merge (not a rebase) keeps a conflict the
+            // checks above did not foresee as a conflicted *merge*: conflict markers, `git status`
+            // listing both sides, and `git merge --abort` as the way out. --autostash carries
+            // uncommitted edits to unrelated files across the merge.
+            GitCommandResult pull = RunGitDetailed(repoRoot, "merge --no-edit --autostash @{u}", GitSyncPullTimeoutMs);
 
-            // --autostash for a merge pull needs git 2.27+. Older builds reject the option outright,
-            // in which case retry the plain pull: it still succeeds whenever the tree is clean.
+            // --autostash for merge needs git 2.27+. Older builds reject the option outright, in
+            // which case retry the plain merge: it still succeeds whenever the tree is clean.
             if (pull != null && pull.ExitCode != 0 && MentionsUnsupportedAutoStash(pull.StdErr))
-                pull = RunGitDetailed(repoRoot, "pull --no-rebase", GitSyncPullTimeoutMs);
+                pull = RunGitDetailed(repoRoot, "merge --no-edit @{u}", GitSyncPullTimeoutMs);
 
             if (pull == null)
-                return LogSkip(skipped, "git pull did not return within the timeout");
+                return TimedOutOutcome();
 
             // Measured with git 2.55: a pull whose *autostash restore* conflicts still exits 0, so the
             // unmerged paths — not the exit code — are what says the tree needs resolving.
@@ -366,6 +434,64 @@ namespace ClaudeCodeVS
 
             return ClassifyPullResult(pull.ExitCode, pull.StdOut, pull.StdErr, conflicts, moved,
                 upstreamName, false, false, false);
+        }
+
+        /// <summary>
+        /// A git command that ran past its timeout. Counted as the session's pull so an unreachable
+        /// remote doesn't cost the full timeout again on every prompt.
+        /// </summary>
+        private static GitPullOutcome TimedOutOutcome()
+        {
+            return new GitPullOutcome
+            {
+                Kind = GitPullOutcomeKind.Failed,
+                PullExecuted = true,
+                Notice = Loc.L("Auto-pull skipped: {0}", Loc.L("git pull did not complete."))
+            };
+        }
+
+        private static GitPullOutcome HeldBackOutcome(string notice)
+        {
+            return new GitPullOutcome { Kind = GitPullOutcomeKind.HeldBack, PullExecuted = true, Notice = notice };
+        }
+
+        /// <summary>Number of commits in <paramref name="range"/>; -1 when git could not say.</summary>
+        private int CountCommits(string repoRoot, string range)
+        {
+            GitCommandResult result = RunGitDetailed(repoRoot, "rev-list --count " + range, GitSyncPreflightTimeoutMs);
+            if (result == null || result.ExitCode != 0)
+                return -1;
+
+            return int.TryParse(result.StdOut?.Trim(), out int count) ? count : -1;
+        }
+
+        /// <summary>Runs a git command whose output is a NUL-separated path list (`-z`).</summary>
+        private List<string> ReadPathList(string repoRoot, string arguments)
+        {
+            GitCommandResult result = RunGitDetailed(repoRoot, arguments, GitSyncPreflightTimeoutMs);
+            if (result == null || result.ExitCode != 0)
+                return new List<string>();
+
+            return SplitNulPaths(result.StdOut);
+        }
+
+        /// <summary>
+        /// Files a merge of the upstream into HEAD would leave conflicted, without touching the
+        /// working tree or the index. Uses `git merge-tree --write-tree` (git 2.38+); an older git
+        /// falls back to "both sides changed the same file", which can only over-report.
+        /// </summary>
+        private List<string> PredictMergeConflicts(string repoRoot, List<string> incomingFiles)
+        {
+            GitCommandResult mergeTree = RunGitDetailed(repoRoot,
+                "merge-tree --write-tree --no-messages --name-only HEAD @{u}", GitSyncPreflightTimeoutMs);
+
+            if (mergeTree != null && mergeTree.ExitCode == 0)
+                return new List<string>();
+            if (mergeTree != null && mergeTree.ExitCode == 1)
+                return ParseMergeTreeConflicts(mergeTree.StdOut);
+
+            List<string> localCommitFiles = ReadPathList(repoRoot, "diff --name-only -z @{u}...HEAD");
+            return FindOverlappingPaths(localCommitFiles, incomingFiles);
         }
 
         /// <summary>
@@ -680,6 +806,107 @@ namespace ClaudeCodeVS
                 : Loc.L("Auto-pull succeeded, but restoring your uncommitted changes conflicted in {0} — asking the agent to resolve them first.", files);
         }
 
+        /// <summary>Splits NUL-separated git output (`-z`) into paths, dropping empties.</summary>
+        public static List<string> SplitNulPaths(string output)
+        {
+            if (string.IsNullOrEmpty(output))
+                return new List<string>();
+
+            return output.Split('\0')
+                .Select(p => p.Trim('\r', '\n'))
+                .Where(p => p.Length > 0)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Every path in `git status --porcelain=v1 -z` output: modified, staged, deleted, untracked,
+        /// and both names of a rename or copy (the original name follows as its own NUL-separated
+        /// field, without a status code).
+        /// </summary>
+        public static List<string> ParseStatusPaths(string porcelainStatusZ)
+        {
+            var paths = new List<string>();
+            if (string.IsNullOrEmpty(porcelainStatusZ))
+                return paths;
+
+            string[] fields = porcelainStatusZ.Split('\0');
+            for (int i = 0; i < fields.Length; i++)
+            {
+                string entry = fields[i];
+                if (entry.Length < 4)
+                    continue;
+
+                string code = entry.Substring(0, 2);
+                paths.Add(entry.Substring(3));
+
+                if ((code[0] == 'R' || code[0] == 'C') && i + 1 < fields.Length)
+                {
+                    i++;
+                    if (fields[i].Length > 0)
+                        paths.Add(fields[i]);
+                }
+            }
+
+            return paths;
+        }
+
+        /// <summary>
+        /// Conflicted paths from `git merge-tree --write-tree --no-messages --name-only` output: the
+        /// first line is the resulting tree id, every following line a conflicted file.
+        /// </summary>
+        public static List<string> ParseMergeTreeConflicts(string output)
+        {
+            if (string.IsNullOrEmpty(output))
+                return new List<string>();
+
+            return output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Skip(1)
+                .Select(l => l.Trim())
+                .Where(l => l.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Paths present in both lists, in the order of <paramref name="incoming"/>. Case-insensitive,
+        /// with `\` and `/` treated alike: the working tree is on Windows.
+        /// </summary>
+        public static List<string> FindOverlappingPaths(IEnumerable<string> local, IEnumerable<string> incoming)
+        {
+            if (local == null || incoming == null)
+                return new List<string>();
+
+            var localSet = new HashSet<string>(local.Select(NormalizeRepoPath), StringComparer.OrdinalIgnoreCase);
+            return incoming
+                .Where(p => localSet.Contains(NormalizeRepoPath(p)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static string NormalizeRepoPath(string path)
+        {
+            return (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/');
+        }
+
+        /// <summary>
+        /// Notice for a pull that was held back. Names up to three files so the user knows where to
+        /// look, and says plainly that nothing was changed.
+        /// </summary>
+        public static string BuildHeldBackNotice(string upstreamName, List<string> files, bool uncommitted)
+        {
+            var list = files ?? new List<string>();
+            const int MaxNamed = 3;
+            string named = string.Join(", ", list.Take(MaxNamed));
+            if (list.Count > MaxNamed)
+                named = Loc.L("{0} and {1} more", named, list.Count - MaxNamed);
+
+            string upstream = string.IsNullOrWhiteSpace(upstreamName) ? Loc.L("the remote") : upstreamName;
+
+            return uncommitted
+                ? Loc.L("Auto-pull held back: new commits on {0} change files you have edited locally ({1}). Nothing was pulled; commit or stash your edits and pull when you are ready.", upstream, named)
+                : Loc.L("Auto-pull held back: new commits on {0} conflict with your local commits ({1}). Nothing was pulled; pull and resolve the merge when you are ready.", upstream, named);
+        }
+
         /// <summary>True when `git stash list` output contains an autostash entry.</summary>
         public static bool StashListMentionsAutoStash(string stashListOutput)
         {
@@ -705,7 +932,8 @@ namespace ClaudeCodeVS
                 || stdErr.IndexOf("only valid with", StringComparison.OrdinalIgnoreCase) >= 0
                 || stdErr.IndexOf("is not supported", StringComparison.OrdinalIgnoreCase) >= 0
                 || stdErr.IndexOf("unrecognized", StringComparison.OrdinalIgnoreCase) >= 0
-                || stdErr.IndexOf("usage: git pull", StringComparison.OrdinalIgnoreCase) >= 0;
+                || stdErr.IndexOf("usage: git pull", StringComparison.OrdinalIgnoreCase) >= 0
+                || stdErr.IndexOf("usage: git merge", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         /// <summary>
