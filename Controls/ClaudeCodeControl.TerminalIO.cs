@@ -79,10 +79,47 @@ namespace ClaudeCodeVS
         private const int Windows11FirstBuild = 22000;
 
         /// <summary>
-        /// Cached result of <see cref="IsLegacyWindows10Console"/> (the OS build never changes
-        /// while VS is running). Null until first evaluated.
+        /// First Windows build whose console host brackets a paste itself (Windows 11 24H2). When
+        /// the app has asked for bracketed paste, that host wraps an Edit→Paste in the markers on
+        /// its own and strips every ESC from the pasted text, so markers we add show up in the
+        /// prompt as the literal text "[200~" … "[201~" (issue #264).
         /// </summary>
-        private static bool? _isLegacyWindows10Console;
+        internal const int ConhostBracketedPasteFirstBuild = 26100;
+
+        /// <summary>
+        /// Cached OS build number (it never changes while VS is running). Null until first read;
+        /// 0 when the registry read failed.
+        /// </summary>
+        private static int? _windowsBuildNumber;
+
+        /// <summary>
+        /// The Windows build number, read from the registry rather than <c>Environment.OSVersion</c>
+        /// because the latter is subject to the host process's compatibility manifest. 0 if unknown.
+        /// </summary>
+        private static int GetWindowsBuildNumber()
+        {
+            if (_windowsBuildNumber.HasValue)
+                return _windowsBuildNumber.Value;
+
+            int buildNumber = 0;
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    string build = key?.GetValue("CurrentBuildNumber") as string;
+                    if (!int.TryParse(build, out buildNumber) || buildNumber < 0)
+                        buildNumber = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"GetWindowsBuildNumber: registry read failed: {ex.Message}");
+            }
+
+            _windowsBuildNumber = buildNumber;
+            return buildNumber;
+        }
 
         /// <summary>
         /// True when running on Windows 10 (build &lt; 22000), whose console host streams a paste
@@ -91,33 +128,22 @@ namespace ClaudeCodeVS
         /// delimited block. Claude Code's input layer reacts to that by generating a runaway
         /// series of "[Pasted text #N]" placeholders — the flood of issue #83, which reproduces
         /// only on Windows 10 (the same extension build is clean on Windows 11).
-        ///
-        /// Read from the registry rather than <c>Environment.OSVersion</c> because the latter is
-        /// subject to the host process's compatibility manifest.
         /// </summary>
         private static bool IsLegacyWindows10Console()
         {
-            if (_isLegacyWindows10Console.HasValue)
-                return _isLegacyWindows10Console.Value;
+            int build = GetWindowsBuildNumber();
+            return build > 0 && build < Windows11FirstBuild;
+        }
 
-            bool legacy = false;
-            try
-            {
-                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
-                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
-                {
-                    string build = key?.GetValue("CurrentBuildNumber") as string;
-                    if (int.TryParse(build, out int buildNumber) && buildNumber > 0)
-                        legacy = buildNumber < Windows11FirstBuild;
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"IsLegacyWindows10Console: registry read failed: {ex.Message}");
-            }
-
-            _isLegacyWindows10Console = legacy;
-            return legacy;
+        /// <summary>
+        /// Whether a multi-line prompt pasted into Claude Code through conhost needs the
+        /// extension's own bracketed-paste markers on this Windows build: only on hosts older than
+        /// <see cref="ConhostBracketedPasteFirstBuild"/>, which send no markers themselves. An
+        /// unknown build (0) keeps the markers, as before. See <see cref="WrapMultilineAsBracketedPaste"/>.
+        /// </summary>
+        internal static bool NeedsOwnBracketedPasteMarkers(int windowsBuild)
+        {
+            return windowsBuild <= 0 || windowsBuild < ConhostBracketedPasteFirstBuild;
         }
 
         /// <summary>
@@ -145,10 +171,12 @@ namespace ClaudeCodeVS
             text = StripTrailingNewlines(text);
 
             // Claude Code in conhost: send multi-line prompts as an explicit bracketed paste (see
-            // WrapMultilineAsBracketedPaste). Windows Terminal adds the markers itself, and the other
-            // agents are not known to understand them - a bare ESC could even interrupt one - so they
-            // keep the plain paste.
-            if (_wtTabBarHeight == 0 && _currentRunningProvider == AiProvider.ClaudeCode)
+            // WrapMultilineAsBracketedPaste). Windows Terminal adds the markers itself, and so does
+            // conhost from Windows 11 24H2 on - adding ours there leaves "[200~"/"[201~" in the prompt
+            // (#264). The other agents are not known to understand them - a bare ESC could even
+            // interrupt one - so they keep the plain paste.
+            if (_wtTabBarHeight == 0 && _currentRunningProvider == AiProvider.ClaudeCode
+                && NeedsOwnBracketedPasteMarkers(GetWindowsBuildNumber()))
             {
                 text = WrapMultilineAsBracketedPaste(text);
             }
@@ -621,6 +649,9 @@ namespace ClaudeCodeVS
         /// writes a reply into another session's terminal. Line breaks are normalized to LF, since a
         /// lone CR is exactly what the hidden-character check counts, and any ESC in the text is
         /// dropped so it can neither end the paste early nor be flagged in turn.
+        /// Only used on conhost builds older than <see cref="ConhostBracketedPasteFirstBuild"/>: newer
+        /// ones bracket the paste themselves and strip our ESCs, which turns the markers into
+        /// literal "[200~" text (#264, measured on build 26300 with Claude Code 2.1.322).
         /// </remarks>
         internal static string WrapMultilineAsBracketedPaste(string text)
         {

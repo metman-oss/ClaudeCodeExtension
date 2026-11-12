@@ -606,12 +606,20 @@ namespace ClaudeCodeVS
         /// <summary>
         /// When true, the first user-initiated prompt for a workspace runs `git pull` in its
         /// repository, so the agent never starts editing code that is already out of date on the
-        /// remote. Default true. Once per repository per session, not per prompt. Skipped when there
-        /// is no repository, no tracking branch, or a turn is already in flight. A pull that ends in
-        /// conflicts is handed to the agent to resolve as part of the same prompt.
+        /// remote. Opt-in, default false since v309.0 (issue #264: an unexpected pull surprised users
+        /// who merge coworkers' changes by hand). Once per repository per session, not per prompt.
+        /// Skipped when there is no repository, no tracking branch, or a turn is already in flight.
         /// See ClaudeCodeControl.GitSync.cs.
         /// </summary>
-        public bool AutoGitPullBeforePrompt { get; set; } = true;
+        public bool AutoGitPullBeforePrompt { get; set; } = false;
+
+        /// <summary>
+        /// One-time migration marker (v309.0): settings files written before it always carried
+        /// <see cref="AutoGitPullBeforePrompt"/> = true (the old default), so the first load of such a
+        /// file turns auto-pull off. True by default so a fresh install is never "migrated"; an old
+        /// file is recognized by this key being absent. See MigrateAutoGitPullDefaultOff.
+        /// </summary>
+        public bool AutoGitPullDefaultOffMigrated { get; set; } = true;
 
         /// <summary>
         /// When true, unhandled runtime exceptions caught by the Visual Studio debugger are

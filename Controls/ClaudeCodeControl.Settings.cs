@@ -313,6 +313,7 @@ namespace ClaudeCodeVS
                     DedupePreservingOrder(_settings.VisibleProviders);
                     DedupePreservingOrder(_settings.VisibleToolbarButtons);
                     MigrateSessionHistoryButton(_settings);
+                    MigrateAutoGitPullDefaultOff(_settings, json);
 
                     // Retired providers (e.g. QwenCode ordinal 6) deserialize into
                     // a numeric value that is no longer a declared enum member.
@@ -477,6 +478,35 @@ namespace ClaudeCodeVS
                 }
 
                 settings.SessionHistoryButtonMigrated = true;
+            }
+        }
+
+        /// <summary>
+        /// v309.0 (issue #264): "Pull from git before the first prompt" became opt-in. Settings files
+        /// from earlier versions always saved it as true (the old default), so a true there says
+        /// nothing about the user's choice: turn it off once, on the first load of a file that has no
+        /// <see cref="ClaudeCodeSettings.AutoGitPullDefaultOffMigrated"/> key. The key is written with
+        /// the next save, after which the user's own choice stands.
+        /// </summary>
+        internal static void MigrateAutoGitPullDefaultOff(ClaudeCodeSettings settings, string diskJson)
+        {
+            if (settings == null || string.IsNullOrWhiteSpace(diskJson)) return;
+
+            try
+            {
+                var obj = Newtonsoft.Json.Linq.JObject.Parse(diskJson);
+                if (obj.TryGetValue(nameof(ClaudeCodeSettings.AutoGitPullDefaultOffMigrated),
+                        StringComparison.OrdinalIgnoreCase, out _))
+                {
+                    return;
+                }
+
+                settings.AutoGitPullBeforePrompt = false;
+                settings.AutoGitPullDefaultOffMigrated = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"MigrateAutoGitPullDefaultOff: {ex.Message}");
             }
         }
 

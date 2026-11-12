@@ -31,6 +31,18 @@ namespace ClaudeCodeExtension.Tests
             Assert.AreEqual("fix the bug", ClaudeCodeControl.StripTrailingNewlines("fix the bug\r"));
         }
 
+        [TestMethod]
+        public void BracketedPasteMarkersAreOnlyAddedWhereConhostDoesNotAddItsOwn()
+        {
+            // #264: from Windows 11 24H2 on, conhost brackets the paste itself and strips our ESCs,
+            // so our markers would reach Claude Code as the literal text "[200~" / "[201~".
+            Assert.IsTrue(ClaudeCodeControl.NeedsOwnBracketedPasteMarkers(19045));  // Windows 10 22H2
+            Assert.IsTrue(ClaudeCodeControl.NeedsOwnBracketedPasteMarkers(22631));  // Windows 11 23H2
+            Assert.IsFalse(ClaudeCodeControl.NeedsOwnBracketedPasteMarkers(26100)); // Windows 11 24H2
+            Assert.IsFalse(ClaudeCodeControl.NeedsOwnBracketedPasteMarkers(26200)); // 25H2, the reporter's build
+            Assert.IsTrue(ClaudeCodeControl.NeedsOwnBracketedPasteMarkers(0));      // unknown build: keep the old behavior
+        }
+
         /// <summary>
         /// Multi-line prompts go to Claude Code as one explicit bracketed paste. Without the markers
         /// conhost's paste turns every line break into Enter: short prompts were split into several

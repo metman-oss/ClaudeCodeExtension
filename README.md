@@ -40,7 +40,7 @@ Enjoying the extension? [Buy me a coffee](https://www.buymeacoffee.com/dliedke) 
 
 - **On Agent Finish** — Optionally play a sound, show a notification (with duration, plus token count for Claude Code), and run an action (build/rebuild, run, tests, a script, or a follow-up command) when the agent goes idle. Configured per solution. Configure via *⚙ → Settings...*.
 
-- **Pull before sending** — Runs `git pull` in the solution’s repository before your first prompt, so the agent never edits a file that is already out of date on the remote. If the incoming changes would conflict with your local work, nothing is pulled and you are told why. On by default; turn it off via *⚙ → Settings... → Automation*.
+- **Pull before sending** — Runs `git pull` in the solution’s repository before your first prompt, so the agent never edits a file that is already out of date on the remote. If the incoming changes would conflict with your local work, nothing is pulled and you are told why. Off by default; turn it on via *⚙ → Settings... → Automation*.
 
 - **TFVC checkout** — In TFVC-bound solutions, Claude Code in native mode has read-only files checked out through Visual Studio before it edits them. On by default; turn it off via *⚙ → Settings... → Automation*.
 
@@ -197,6 +197,11 @@ A huge thank you to every developer who took the time to improve this extension 
 - [@wluisdev](https://github.com/wluisdev) — 1 PR
 
 ## Version History
+
+### Version 309.0
+- **Pull from git before the first prompt** is now off by default, and is turned off once for existing installs. If you want it, turn it back on in *⚙ → Settings... → Automation*.
+- Multi-line prompts sent to Claude Code through the Command Prompt terminal no longer show stray `[200~` and `[201~` text on Windows 11 24H2 and later.
+- Thanks to [@jalpizarTechnosoft](https://github.com/jalpizarTechnosoft) for reporting (#264).
 
 ### Version 308.0
 - **Pull from git before the first prompt** no longer creates merge conflicts: when the incoming changes touch files you have edited locally, or would conflict with your local commits, nothing is pulled and a notice names the files instead.

@@ -41,6 +41,44 @@ namespace ClaudeCodeExtension.Tests
             Assert.IsTrue(settings.SessionHistoryButtonMigrated);
         }
 
+        /// <summary>
+        /// v309.0 (#264): auto-pull became opt-in. A settings file from before that always saved the
+        /// old default (true), so its first load turns it off.
+        /// </summary>
+        [TestMethod]
+        public void AutoGitPullIsTurnedOffOnceForSettingsFromBeforeTheNewDefault()
+        {
+            var settings = new ClaudeCodeSettings { AutoGitPullBeforePrompt = true, AutoGitPullDefaultOffMigrated = true };
+
+            ClaudeCodeControl.MigrateAutoGitPullDefaultOff(settings, "{\"AutoGitPullBeforePrompt\": true}");
+
+            Assert.IsFalse(settings.AutoGitPullBeforePrompt);
+            Assert.IsTrue(settings.AutoGitPullDefaultOffMigrated);
+        }
+
+        /// <summary>Once the marker is on disk, turning auto-pull back on is the user's choice and sticks.</summary>
+        [TestMethod]
+        public void AutoGitPullMigrationDoesNotOverrideTheUsersLaterChoice()
+        {
+            var settings = new ClaudeCodeSettings { AutoGitPullBeforePrompt = true };
+
+            ClaudeCodeControl.MigrateAutoGitPullDefaultOff(settings,
+                "{\"AutoGitPullBeforePrompt\": true, \"AutoGitPullDefaultOffMigrated\": true}");
+
+            Assert.IsTrue(settings.AutoGitPullBeforePrompt);
+        }
+
+        /// <summary>A fresh install has auto-pull off and counts as already migrated.</summary>
+        [TestMethod]
+        public void AutoGitPullIsOffByDefault()
+        {
+            var settings = new ClaudeCodeSettings();
+
+            Assert.IsFalse(settings.AutoGitPullBeforePrompt);
+            Assert.IsTrue(settings.AutoGitPullDefaultOffMigrated);
+            StringAssert.Contains(Newtonsoft.Json.JsonConvert.SerializeObject(settings), "\"AutoGitPullDefaultOffMigrated\":true");
+        }
+
         /// <summary>Once migrated, un-promoting Session History in Settings → Toolbar is the user's choice and sticks.</summary>
         [TestMethod]
         public void SessionHistoryMigrationDoesNotOverrideTheUsersLaterChoice()
